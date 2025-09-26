@@ -31,9 +31,9 @@ test.describe('Athenahealth Front-End Performance - Common Provider/MA Workflow'
       }
     };
 
-    // 1. SSO LOGIN and measure login time
+    // 1. INITIAL SSO LOGIN - First Go button
     console.log('Starting SSO login...');
-    const loginStart = Date.now();
+    const initialLoginStart = Date.now();
     await page.goto(sandboxUrl!);
 
     // Wait for the SSO page to load
@@ -55,7 +55,14 @@ test.describe('Athenahealth Front-End Performance - Common Provider/MA Workflow'
 
       // Wait for page to load after first Go button click
       await page.waitForLoadState('networkidle', { timeout: 20000 });
-      console.log('Looking for second Go button...');
+
+      metrics.initialLoginDuration = Date.now() - initialLoginStart;
+      console.log(`✅ Initial SSO step completed in ${metrics.initialLoginDuration} ms.`);
+      totalWorkflowDuration += metrics.initialLoginDuration;
+
+      // 2. DEPARTMENT SELECTION - Second Go button
+      console.log('Starting department selection...');
+      const deptSelectionStart = Date.now();
 
       // Look for the second Go button (department selection)
       const secondGoButton = page.getByRole('button', { name: /go/i })
@@ -71,54 +78,32 @@ test.describe('Athenahealth Front-End Performance - Common Provider/MA Workflow'
 
         // Wait for navigation to main interface after department selection
         await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-        console.log('Department selection completed');
+
+        metrics.departmentSelectionDuration = Date.now() - deptSelectionStart;
+        console.log(`✅ Department selection completed in ${metrics.departmentSelectionDuration} ms.`);
+        totalWorkflowDuration += metrics.departmentSelectionDuration;
       } else {
         console.log('Second Go button not found - may have completed with first click');
+        metrics.departmentSelectionDuration = 0;
       }
     } else {
       console.log('Go button not found - waiting for manual completion or different flow');
       // Wait for manual completion
       await page.waitForTimeout(30000);
+      metrics.initialLoginDuration = Date.now() - initialLoginStart;
+      metrics.departmentSelectionDuration = 0;
     }
 
-    // SSO login successful - now navigate to main Athenahealth interface
-    console.log('SSO login completed successfully!');
-
-    // Check if we need to navigate from completion page to main interface
-    if (page.url().includes('/login/complete.esp')) {
-      console.log('On completion page, navigating to main interface...');
-
-      // Try to find a link or button to continue to main interface
-      const continueToApp = page.getByRole('link', { name: /continue/i })
-        .or(page.getByRole('button', { name: /continue/i }))
-        .or(page.getByRole('link', { name: /enter/i }))
-        .or(page.getByRole('link', { name: /athenahealth/i }))
-        .or(page.getByRole('link', { name: /athenaone/i }))
-        .or(page.getByText(/click here/i))
-        .first();
-
-      if (await continueToApp.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await continueToApp.click();
-        await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-      } else {
-        // Try navigating directly to the base URL
-        console.log('No continue button found, trying to navigate to base URL...');
-        const baseUrl = sandboxUrl!.split('/login')[0]; // Get base URL without login path
-        await page.goto(baseUrl);
-        await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-      }
-    }
-
-    metrics.loginDuration = Date.now() - loginStart;
-    console.log(`✅ Login successful in ${metrics.loginDuration} ms.`);
-    totalWorkflowDuration += metrics.loginDuration;
+    // Calculate total login time (both steps combined)
+    metrics.totalLoginDuration = metrics.initialLoginDuration + metrics.departmentSelectionDuration;
+    console.log(`✅ Complete login process took ${metrics.totalLoginDuration} ms.`);
 
     // Wait a moment for the page to settle after navigation
     await page.waitForTimeout(3000);
 
-    // 2. SEARCH FOR SPECIFIC PATIENT and measure search time
+    // 2. SEARCH FOR SPECIFIC PATIENT and find search field
     console.log('Starting patient search for "1xtest, amber"...');
-    const searchStart = Date.now();
+    let searchStartTime = 0;
 
     // Look for the search field using div id "search"
     const searchField = page.locator('#search')
@@ -155,23 +140,49 @@ test.describe('Athenahealth Front-End Performance - Common Provider/MA Workflow'
 
         if (await frameSearchField.isVisible({ timeout: 2000 }).catch(() => false)) {
           console.log(`Found search field in frame ${i}!`);
-          await frameSearchField.fill('1xtest, amber');
 
-          // Look for search button in the same frame
-          const frameSearchButton = frame.getByRole('button', { name: /search/i })
-            .or(frame.locator('button[type="submit"]'))
-            .or(frame.locator('[data-testid*="search"]'))
-            .or(frame.locator('input[type="submit"]'))
-            .or(frame.locator('button').filter({ hasText: /search/i }))
+          // Clear the field and type letter by letter to trigger autocomplete dropdown
+          await frameSearchField.clear();
+          console.log('Typing patient name letter by letter...');
+          await frameSearchField.type('1xtest, amber', { delay: 150 });
+
+          // Wait for autocomplete/dropdown to appear
+          await page.waitForTimeout(2000);
+
+          // Look for dropdown option with the patient name
+          const patientOption = frame.getByText(/1xtest.*amber/i)
+            .or(frame.getByText(/amber.*1xtest/i))
+            .or(frame.locator('.autocomplete').getByText(/1xtest/i))
+            .or(frame.locator('.dropdown').getByText(/1xtest/i))
+            .or(frame.locator('[role="listbox"]').getByText(/1xtest/i))
+            .or(frame.locator('ul').getByText(/1xtest/i))
             .first();
 
-          if (await frameSearchButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-            console.log('Found search button in same frame, clicking...');
-            await frameSearchButton.click();
+          if (await patientOption.isVisible({ timeout: 3000 }).catch(() => false)) {
+            console.log('Found patient in dropdown, clicking...');
+            await patientOption.click();
           } else {
-            // Try pressing Enter on the search field
-            console.log('No search button found, trying Enter key...');
-            await frameSearchField.press('Enter');
+            // If no dropdown, try Enter or search button
+            console.log('No dropdown found, trying search submission...');
+
+            const frameSearchButton = frame.getByRole('button', { name: /search/i })
+              .or(frame.locator('button[type="submit"]'))
+              .or(frame.locator('[data-testid*="search"]'))
+              .or(frame.locator('input[type="submit"]'))
+              .or(frame.locator('button').filter({ hasText: /search/i }))
+              .first();
+
+            if (await frameSearchButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+              console.log('Found search button, clicking...');
+              // Start timing from when search button is clicked
+              searchStartTime = Date.now();
+              await frameSearchButton.click();
+            } else {
+              console.log('No search button found, pressing Enter...');
+              // Start timing from when Enter is pressed
+              searchStartTime = Date.now();
+              await frameSearchField.press('Enter');
+            }
           }
 
           searchFound = true;
@@ -211,24 +222,48 @@ test.describe('Athenahealth Front-End Performance - Common Provider/MA Workflow'
       return;
     }
 
-    // Wait for search results - try multiple indicators
-    await expect(
-      page.getByRole('list')
-        .or(page.locator('[data-testid*="result"]'))
-        .or(page.locator('.search-results'))
-        .or(page.getByText(/1xtest.*amber/i))
-        .or(page.getByText(/amber.*1xtest/i))
-        .first()
-    ).toBeVisible({ timeout: 15000 });
-    metrics.searchDuration = Date.now() - searchStart;
-    console.log(`✅ Patient search for "1xtest, amber" completed in ${metrics.searchDuration} ms.`);
+    // Wait for search results page to load - check for findpatient.esp frame
+    console.log('Looking for search results page to load...');
+    let resultsFound = false;
+
+    // Check if any frame loaded the findpatient.esp page (which means search completed)
+    for (let i = 0; i < 60; i++) { // Check for up to 30 seconds (500ms intervals)
+      await page.waitForTimeout(500);
+
+      const frames = page.frames();
+      for (const frame of frames) {
+        if (frame.url().includes('findpatient.esp')) {
+          console.log(`✅ Search results page loaded in frame: ${frame.url()}`);
+          resultsFound = true;
+          break;
+        }
+      }
+
+      if (resultsFound) break;
+    }
+
+    if (!resultsFound) {
+      console.log('❌ Search results page did not load within timeout');
+      throw new Error('Search results page not found');
+    }
+
+    // Calculate search response time from when Enter/Search was pressed
+    metrics.searchDuration = Date.now() - searchStartTime;
+    console.log(`✅ Patient search response time: ${metrics.searchDuration} ms (from Enter press to results)`);
     totalWorkflowDuration += metrics.searchDuration;
 
     // STOP HERE - Just measure login and patient search timing
-    console.log('=== PERFORMANCE SUMMARY ===');
-    console.log(`Login Duration: ${metrics.loginDuration} ms`);
-    console.log(`Patient Search Duration: ${metrics.searchDuration} ms`);
-    console.log(`Total Time: ${totalWorkflowDuration} ms`);
+    console.log('=== DETAILED PERFORMANCE SUMMARY ===');
+    console.log(`1. Initial SSO Login: ${metrics.initialLoginDuration} ms`);
+    console.log(`2. Department Selection: ${metrics.departmentSelectionDuration} ms`);
+    console.log(`3. Patient Search Response: ${metrics.searchDuration} ms`);
+    console.log(`---`);
+    console.log(`Total Login Process: ${metrics.totalLoginDuration} ms`);
+    console.log(`Total Workflow Time: ${totalWorkflowDuration} ms`);
+
+    // Wait so you can see the search results before browser closes
+    console.log('Waiting 30 seconds so you can see the search results...');
+    await page.waitForTimeout(30000);
 
     // Skip the rest of the workflow for now
     return;
